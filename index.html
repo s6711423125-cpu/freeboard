@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IoT Dashboard · iot-125</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1f4;--panel:#fff;--ink:#14212b;--mute:#5d6b77;--line:#d5dce2;
+--temp:#d9480f;--humi:#1c7ed6;--light:#b58900;--ok:#2f9e44;--bad:#c92a2a}
+@media (prefers-color-scheme:dark){:root{--bg:#10171d;--panel:#18222b;--ink:#e8eef2;--mute:#92a1ad;--line:#2a3742;
+--temp:#ff8a4c;--humi:#5aa9f5;--light:#e8b923;--ok:#51cf66;--bad:#ff6b6b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:'Sarabun',system-ui,sans-serif;line-height:1.5}
+main{max-width:980px;margin:0 auto;padding:24px 16px 40px}
+header{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+h1{margin:0;font-size:1.6rem;font-weight:800}
+.sub{color:var(--mute);font-size:.95rem}
+.status{display:flex;align-items:center;gap:8px;font-weight:600}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--mute)}
+.status.on .dot{background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 25%,transparent)}
+.status.off .dot{background:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-top:4px solid var(--c);border-radius:6px;padding:16px}
+.card .name{color:var(--mute);font-size:.95rem}
+.card .val{font-size:2.8rem;font-weight:800;line-height:1.1;color:var(--c)}
+.card .unit{font-size:1.1rem;font-weight:600;margin-left:4px;color:var(--mute)}
+.chart{margin-top:12px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
+.chart h2{margin:0 0 8px;font-size:1.05rem}
+.wrap{position:relative;height:320px}
+#err{color:var(--bad);margin-top:12px;display:none}
+@media(max-width:640px){.grid{grid-template-columns:1fr}.card .val{font-size:2.3rem}}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div>
+    <h1>แดชบอร์ด ESP32 แบบเรียลไทม์</h1>
+    <div class="sub">อุปกรณ์ <span id="dev"></span> · อัปเดตล่าสุด <span id="last">–</span></div>
+  </div>
+  <div class="status" id="status"><span class="dot"></span><span id="stxt">กำลังเชื่อมต่อ</span></div>
+</header>
+
+<section class="grid">
+  <div class="card" style="--c:var(--temp)"><div class="name">อุณหภูมิ</div><div><span class="val" id="temp">–</span><span class="unit">°C</span></div></div>
+  <div class="card" style="--c:var(--humi)"><div class="name">ความชื้น</div><div><span class="val" id="humi">–</span><span class="unit">%</span></div></div>
+  <div class="card" style="--c:var(--light)"><div class="name">แสง</div><div><span class="val" id="light">–</span><span class="unit">lx</span></div></div>
+</section>
+
+<section class="chart">
+  <h2>ข้อมูลย้อนหลัง 50 รายการล่าสุด</h2>
+  <div class="wrap"><canvas id="chart"></canvas></div>
+</section>
+<div id="err"></div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script>
+// ===== แก้ 2 ค่านี้ให้ตรงกับของคุณ =====
+const DB_URL = "https://peerapat-125-iot-default-rtdb.asia-southeast1.firebasedatabase.app";
+const DEVICE = "iot-125";
+// =====================================
+
+const $ = id => document.getElementById(id);
+$("dev").textContent = DEVICE;
+firebase.initializeApp({ databaseURL: DB_URL });
+const db = firebase.database();
+const base = "lab/" + DEVICE;
+let lastTs = 0;
+
+function showErr(e){ const el=$("err"); el.style.display="block"; el.textContent="อ่านข้อมูลไม่ได้: "+e.message+" (ตรวจ Rules และ path)"; }
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const hms = s => new Date(s*1000).toLocaleTimeString("th-TH",{hour12:false});
+
+// ค่าปัจจุบัน (latest)
+db.ref(base + "/latest").on("value", snap => {
+  const d = snap.val();
+  if(!d) return;
+  $("temp").textContent  = Number(d.temp).toFixed(1);
+  $("humi").textContent  = Number(d.humi).toFixed(1);
+  $("light").textContent = Math.round(d.light);
+  lastTs = d.timestamp || 0;
+  $("last").textContent = lastTs ? new Date(lastTs*1000).toLocaleString("th-TH") : "–";
+  refreshStatus();
+}, showErr);
+
+// ออนไลน์ถ้าข้อมูลใหม่กว่า 30 วินาที
+function refreshStatus(){
+  const age = Date.now()/1000 - lastTs;
+  const on = lastTs && age < 30;
+  $("status").className = "status " + (on ? "on" : "off");
+  $("stxt").textContent = on ? "ออนไลน์" : (lastTs ? "ออฟไลน์ (ไม่มีข้อมูลใหม่)" : "ยังไม่มีข้อมูล");
+}
+setInterval(refreshStatus, 3000);
+
+// กราฟย้อนหลัง (history)
+const chart = new Chart($("chart"), {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label:"อุณหภูมิ (°C)", data:[], borderColor:css("--temp"),  yAxisID:"y",  tension:.25, pointRadius:0 },
+    { label:"ความชื้น (%)",  data:[], borderColor:css("--humi"),  yAxisID:"y",  tension:.25, pointRadius:0 },
+    { label:"แสง (lx)",      data:[], borderColor:css("--light"), yAxisID:"y2", tension:.25, pointRadius:0 }
+  ]},
+  options: { responsive:true, maintainAspectRatio:false, animation:false,
+    interaction:{ mode:"index", intersect:false },
+    scales:{ y:{ title:{display:true,text:"°C / %"} },
+             y2:{ position:"right", grid:{drawOnChartArea:false}, title:{display:true,text:"lx"} },
+             x:{ ticks:{ maxTicksLimit:8 } } } }
+});
+
+db.ref(base + "/history").orderByKey().limitToLast(50).on("value", snap => {
+  const rows = Object.values(snap.val() || {}).sort((a,b)=>a.timestamp-b.timestamp);
+  chart.data.labels = rows.map(r => hms(r.timestamp));
+  chart.data.datasets[0].data = rows.map(r => r.temp);
+  chart.data.datasets[1].data = rows.map(r => r.humi);
+  chart.data.datasets[2].data = rows.map(r => r.light);
+  chart.update();
+}, showErr);
+</script>
+</body>
+</html>
